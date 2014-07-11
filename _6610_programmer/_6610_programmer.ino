@@ -13,7 +13,7 @@
  */
 #define PAGE_SIZE 64
 
-#define LAST_PAGE 48
+#define LAST_PAGE 64
 
 #define MAX_TRYS 10
 
@@ -37,15 +37,15 @@
 /*Prototype. This function converts the 4 character byte instructions mentioned above
  *into actual hexadecimal numbers.
  */
-u16 convert_to_16_bit(char * line);
+u16 convert_to_16_bit(char line[]);
 boolean verify_firmware_image(SdFile& file);
 boolean check(char c);
 void pass_fail(const char * str, boolean res);
 boolean erase_flash();
 void print_trys(int trys);
-boolean sd_get_next_page(u16 * buffer);
-boolean sd_get_page(u16 * buffer, u8 page_num);
-boolean write_page(const u16 * source, int page_num);
+boolean sd_get_next_page(u16 buffer[]);
+boolean sd_get_page(u16 buffer[], u8 page_num);
+boolean write_page(const u16 source[], int page_num);
 void finish();
 void flash(int blips);
 
@@ -64,6 +64,8 @@ SdFile myFile;
 
 u16 _page[PAGE_SIZE];
 u16 _error_code;
+u8 _spi_speed = SPI_FULL_SPEED;
+
 
 //Object that handles communicating with the MAX78615 chip in FPI mode.
 MAX78615_PROGRAMMER m;
@@ -75,7 +77,7 @@ MAX78615_PROGRAMMER m;
 void configure_spi_sonoma() { m.configure_spi(); }
 
 //Reconfigure the SPI to talk to the SD card. 
-void configure_spi_sd() { SPI.setBitOrder(MSBFIRST); SPI.setDataMode(SPI_MODE0); SPI.setClockDivider(SPI_FULL_SPEED); }
+void configure_spi_sd() { SPI.setBitOrder(MSBFIRST); SPI.setDataMode(SPI_MODE0); SPI.setClockDivider(_spi_speed); }
 
 void setLed(int led, boolean on) { if (on) digitalWrite(led, LOW); else digitalWrite(led, HIGH); }
 
@@ -95,18 +97,18 @@ void setup()
   Serial.print(F("Free Memory: ")); Serial.println(freeMemory());
     
   Serial.println(F("Initializing SD Card"));
-  
-  u8 spi_speed = SPI_FULL_SPEED;
-  
+    
   boolean passed;
   
   int trys = 0;
+  
+  _spi_speed = SPI_FULL_SPEED;
   
 SD_INIT:
   
     configure_spi_sd();
   
-    passed = sd.begin(SD_CS, SPI_FULL_SPEED);
+    passed = sd.begin(SD_CS, _spi_speed);
    
     trys++;
     
@@ -115,7 +117,7 @@ SD_INIT:
     //at the slowest speed
     if (!passed) 
     {
-      if (spi_speed < SPI_SIXTEENTH_SPEED){ spi_speed <<= 1; Serial.println("Slowing down SD SPI CLK..."); }
+      if (_spi_speed < SPI_SIXTEENTH_SPEED){ _spi_speed <<= 1; Serial.println("Slowing down SD SPI CLK..."); }
       
       //goto error handler
       else { _error_code = SD_INIT_ERROR; goto INIT_FAILIURE; }
@@ -195,7 +197,7 @@ void loop()
 {
   static unsigned long time_begin; 
   static boolean passed;
-  static int programming_trys, trys, page_num;
+  static int programming_trys, trys, write_trys, page_num;
   float seconds;
     
 WAIT_FOR_BUTTON:
@@ -228,6 +230,8 @@ START_PROGRAM:
   
   m.reset_wdt();
   
+  m.turn_off_SPI_time_out();
+  
   //Stop the computation engine...
   m.stop_ce();
 
@@ -255,6 +259,8 @@ ERASE:
   
   for (page_num = 0; page_num < LAST_PAGE; page_num++)
   {
+    //Serial.print(F("Writing Page...")); Serial.println(page_num);
+    
     trys = 0;
     //First, try to read a page with the efficient file iterator
     passed = sd_get_next_page(_page);
@@ -306,12 +312,25 @@ ERASE:
     }
     print_trys(trys);
   }  
+  
   Serial.println(F("Final Verification..."));
   
   int page_fail;
   
   trys = 0;
-    
+  
+  configure_spi_sd();
+  
+  myFile = SdFile();
+  
+  passed = myFile.open("IMAGE.DAT", O_READ);
+
+  if (!passed)
+  {
+    _error_code = SD_PAGE_LOAD_ERROR;
+    goto FAILIURE;
+  }
+  
   LAST_VERIFY:
     
     //returns the page it failed at... duh!
@@ -329,12 +348,12 @@ ERASE:
     if (page_fail >= 0) 
     {
       Serial.print(F("Attempting to re-write page ")); Serial.println(page_fail);
-      
+        
       passed = sd_get_page(_page, page_fail);
-      
+ 
       if(!passed) 
       {
-        if (trys >= MAX_TRYS)
+        if (trys >= 3)
         {
           Serial.println(F("While trying to re-write a page during verification..."));
           Serial.print  (F("Couldn't re-read SD card page # ")); Serial.println(page_fail);
@@ -342,21 +361,18 @@ ERASE:
           _error_code = SD_PAGE_LOAD_ERROR;   goto FAILIURE;
         }
       }
-    
-      int write_trys;
-      
       write_trys = repeatively_write_page(_page, page_fail);
     
-      if (trys == -1 || trys >= MAX_TRYS) 
+      if (write_trys == -1 || trys >= MAX_TRYS) 
       {
         Serial.print(F("Couldn't re-write page # ")); Serial.println(page_fail);
         
         _error_code = WRITE_PAGE_ERROR;   goto FAILIURE;
       }
-      print_trys(trys);
+      print_trys(write_trys);
       
       Serial.println(F("Attempting re-verification..."));
-      
+    
       goto LAST_VERIFY;    
     }
     
@@ -451,14 +467,17 @@ int last_verify()
 {
   int page_num, trys;
   
+  boolean sd_read_success, page_pass;  
+
+  configure_spi_sd();
+  
   myFile.rewind();
   
-  boolean sd_read_success, page_pass;  
-  
   for (page_num = 0; page_num < LAST_PAGE; page_num++)
-  {        
+  { 
+    
     sd_read_success = sd_get_next_page(_page);
-     
+    
     if (!sd_read_success) 
     { 
        return -2;
@@ -470,16 +489,20 @@ int last_verify()
     VERIFY:
     
       trys++;
-    
+   
       m.reset_wdt();
-
+      
       page_pass = m.verify_page(page_num, _page);
 
       if (trys >= MAX_TRYS) return page_num;
       
       if (!page_pass) { goto VERIFY; }
    
-    print_trys(trys);  
+    if (trys > 1)
+    {
+      Serial.print(F("Verification of Page # ")); Serial.print(page_num);
+      Serial.print(F(" took ")); Serial.print(trys); Serial.println(" trys...");
+    }  
   }
   return -1;
 }
@@ -526,13 +549,13 @@ boolean erase_flash()
  * Each call consumes words_to_read out of the SD card
  * You cannot specify which line in the file to go to.
  */
-boolean sd_get_next_page(u16 * buffer)
+boolean sd_get_next_page(u16 buffer[])
 {
   //Reconfigure for SD card reading
   configure_spi_sd();
    
   //I defined read page below... it is a utility function
-  int words_read = read_page(myFile, buffer, PAGE_SIZE);
+  int words_read = read_page(myFile, buffer, PAGE_SIZE);  
   
   return words_read == PAGE_SIZE;
 }
@@ -541,7 +564,7 @@ boolean sd_get_next_page(u16 * buffer)
  * SD card. However, it is inefficient...
  * Order N behavior
  */
-boolean sd_get_page(u16 * buffer, u8 page_num)
+boolean sd_get_page(u16 buffer[], u8 page_num)
 {
   myFile.rewind();
   
@@ -561,7 +584,7 @@ boolean sd_get_page(u16 * buffer, u8 page_num)
   return success;
 }
 
-int repeatively_write_page(const u16 * source, int page_num)
+int repeatively_write_page(const u16 source[], int page_num)
 {
   int trys = 0;
   boolean write_success;
@@ -569,17 +592,17 @@ int repeatively_write_page(const u16 * source, int page_num)
   WRITE:
      
     trys++;
+
+    if (trys >= 3 ) return -1;
         
     write_success = write_page(source, page_num);
-    
-    if (trys >= MAX_TRYS) return -1;
-    
+        
     if(!write_success) { goto WRITE; }
  
   return trys;
 }
 
-boolean write_page(const u16 * source, int page_num)
+boolean write_page(const u16 source[], int page_num)
 {
   boolean no_unlock = false;
   configure_spi_sonoma();
@@ -604,7 +627,7 @@ boolean write_page(const u16 * source, int page_num)
   return false;
 }
 
-void pass_fail(const char * str, boolean res)
+void pass_fail(const char str[], boolean res)
 {
    if (res) { Serial.print(F("Passed: ")); Serial.println(str); }
    else     { Serial.print(F("Failed... ")); Serial.println(str); while(true); } 
@@ -622,13 +645,11 @@ boolean verify_firmware_image(SdFile& file)
    
    static char instr[6];
    
-   char delim = '\n';
-   
    configure_spi_sd();
       
    for (i = 0; i <= FLASH_PROGRAM_END; i++)
    {
-     result = file.fgets(instr, 6, &delim);
+     result = file.fgets(instr, 6);
    
      if (result == EOF || result <= 0) { Serial.println(F("file.fgets error...")); return false; }
    
@@ -647,7 +668,7 @@ boolean verify_firmware_image(SdFile& file)
 
 boolean check(char c) { return ('A' <= c && c <= 'F') || ('0' <= c && c <= '9'); }
 
-u16 convert_to_16_bit(char * line)
+u16 convert_to_16_bit(char line[])
 {
   //OP_CODE_CHAR_SIZE the character width of the MAX chip's byte instructions stored on an
   //SD card. 
@@ -681,19 +702,17 @@ u16 convert_to_16_bit(char * line)
    return res;
 }
 
-int read_page(SdFile& file, u16 * ret_page, int words_to_read)
+int read_page(SdFile& file, u16 ret_page[], int words_to_read)
 {
    int i, result;
    
-   static char line[6];
+   char line[6];
    
    //Serial.println("READING SD CARD PAGE_SIZE");
-   
-   char delim = '\n';
       
    for (i = 0; i < PAGE_SIZE; i++)
    {
-     result = file.fgets(line, 6, &delim);
+     result = file.fgets(line, sizeof(line));
    
      if (result == EOF || result <= 0) return i;
    
