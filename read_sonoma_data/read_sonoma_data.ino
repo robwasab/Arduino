@@ -3,7 +3,7 @@
 //allows the MAX7815_LMU.h library to gain access to SPI.h when it is compiled. 
 #include <SPI.h>
 
-MAX78615_LMU m;
+MAX78615_LMU m(8);
 
 void setup()
 {

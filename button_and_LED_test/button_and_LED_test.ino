@@ -1,13 +1,20 @@
-#define BUTTON 5
-#define GREEN 4
-#define RED 3
+#define BUTTON 7
+#define GREEN 6
+#define RED 14
 
-void setLed(int led, boolean on)
+void setLed(int led, boolean on) 
 {
-   if (on) digitalWrite(led, LOW);
-   else    digitalWrite(led, HIGH);
+  if (led == RED)
+  {
+    digitalWrite(RED, on);
+    digitalWrite(GREEN, !on);
+  }
+  if (led == GREEN)
+  {
+    digitalWrite(GREEN, on);
+    digitalWrite(RED, !on);
+  }
 }
-
 
 void flash_error_code(int blips)
 {
